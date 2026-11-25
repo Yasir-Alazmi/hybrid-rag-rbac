@@ -1,4 +1,4 @@
-# Enterprise RAG Reference Architecture
+# Hybrid RAG Reference Implementation
 
 [![CI](https://github.com/Yasir-Alazmi/enterprise-production-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/Yasir-Alazmi/enterprise-production-rag/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
@@ -11,13 +11,13 @@ A small reference implementation of role-based hybrid Retrieval-Augmented Genera
 
 ---
 
-## Architecture Blueprint
+## Architecture
 
 ```
 [ Client Request ] ──► [ Sliding Window Rate Limiter (200 req/min) ]
                                │
                                ▼
-        [ Zero-Trust Bearer Token & JWT Verification Engine ]
+        [ Bearer token / JWT verification ]
         (HMAC-SHA256 JWT / API Tokens: PUBLIC < INTERNAL < CONFIDENTIAL < RESTRICTED)
                                │
                                ▼
@@ -60,7 +60,7 @@ A small reference implementation of role-based hybrid Retrieval-Augmented Genera
 
 ## Core Engineering Capabilities
 
-### 1. Zero-Trust Identity, RBAC & API Hardening (`src/core/security.py`, `src/api/main.py`)
+### 1. Identity, RBAC & API Hardening (`src/core/security.py`, `src/api/main.py`)
 - **HMAC-SHA256 JWT Decoding**: Validates cryptographic signatures, token expiration (`exp`), and tenant clearance claims (`sub`, `role`, `clearance`).
 - **Protected Administrative & Evaluation Endpoints**: `POST /api/v1/ingest`, `DELETE /api/v1/documents/{id}`, and `POST /api/v1/eval` strictly require Bearer authorization with $\ge$ `CONFIDENTIAL` clearance. Unauthenticated calls return `HTTP 401 Unauthorized`; insufficient clearance calls return `HTTP 403 Forbidden`.
 - **Strict Header Enforcement**: Unrecognized or malformed tokens explicitly return `401 Unauthorized` rather than silently degrading permissions.
@@ -159,7 +159,7 @@ What the numbers say:
 
 ---
 
-## Enterprise Production Scaling Blueprint
+## Scaling notes (design only, not implemented)
 
 This repository is architected as a clean reference platform. For horizontal scaling in multi-node Kubernetes clusters, migrate components following this blueprint:
 
@@ -197,7 +197,7 @@ enterprise-production-rag/
 ├── src/
 │   ├── api/                      # FastAPI routes, schemas, and rate-limiting middleware
 │   ├── cache/                    # Role-scoped bounded LRU semantic query cache
-│   ├── core/                     # JWT auth, zero-trust RBAC, Prometheus stage metrics
+│   ├── core/                     # JWT auth, RBAC, Prometheus stage metrics
 │   ├── evaluation/               # Precision, Recall, MRR, NDCG@K, faithfulness scoring
 │   ├── generation/               # Pluggable generation abstraction (Grounded + LLM)
 │   ├── guardrails/               # PII sanitization and adversarial injection screening
@@ -271,7 +271,9 @@ curl -X POST http://localhost:8000/api/v1/eval \
 ## Author & Contact
 
 **Yasir Alazmi**  
-Artificial Intelligence Engineer  
+B.Sc. Artificial Intelligence (expected January 2027), University of Hail  
 - Email: [yasir.alazmi@outlook.sa](mailto:yasir.alazmi@outlook.sa)  
 - LinkedIn: [yasir-alazmi-471832436](https://www.linkedin.com/in/yasir-alazmi-471832436)  
 - GitHub: [Yasir-Alazmi](https://github.com/Yasir-Alazmi)
+
+_Design, evaluation and review by the author; parts of the implementation were written with AI coding assistants and then reviewed and tested._
