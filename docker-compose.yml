@@ -10,6 +10,10 @@ services:
       - "8000:8000"
     environment:
       - APP_ENV=production
+      # Required in production: the app refuses to start with the default secret.
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?set JWT_SECRET_KEY}
+      # Optional pre-shared tokens; the demo tokens are disabled in production.
+      - API_TOKENS_JSON=${API_TOKENS_JSON:-}
       - LOG_LEVEL=INFO
       - HYBRID_ALPHA=0.60
       - CHUNK_SIZE=512

@@ -22,7 +22,7 @@ Standard consumer LLM integrations and simplistic vector search pipelines face s
 +-------------------------------------------------------------------------+
 |                  Zero-Trust Identity & Token Verification               |
 |  - HMAC-SHA256 JWT Token Validation (claims: sub, role, clearance, exp) |
-|  - Pre-shared API Bearer Token Registry with Clearance Scoping          |
+|  - Pre-shared Bearer Tokens (demo tokens only when APP_ENV != prod)     |
 |  - Strictly rejects invalid/forged credentials with HTTP 401             |
 +------------------------------------+------------------------------------+
                                      |
@@ -37,7 +37,8 @@ Standard consumer LLM integrations and simplistic vector search pipelines face s
 +-------------------------------------------------------------------------+
 |                     Role-Scoped Semantic Query Cache                    |
 |  - Normalized Cosine Similarity check against indexed query vectors     |
-|  - Privilege Isolation: user_clearance >= cache_entry.clearance_level   |
+|  - Privilege Isolation: user_clearance == cache_entry.clearance_level   |
+|  - Invalidated on every ingest and document delete                      |
 |  - Bounded LRU eviction policy (1,000 entries)                          |
 +------------------------------------+------------------------------------+
                                      | (Cache Miss)

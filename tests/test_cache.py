@@ -73,6 +73,56 @@ def test_lru_cache_eviction():
     cache.store("q3", vec, "a3", [], clearance_level=1)
     assert len(cache.cache) == 2
     assert cache.evictions == 1
-    assert "q1" not in cache.cache
-    assert "q2" in cache.cache
-    assert "q3" in cache.cache
+    assert (1, "q1") not in cache.cache
+    assert (1, "q2") in cache.cache
+    assert (1, "q3") in cache.cache
+
+
+def test_same_query_at_different_clearances_does_not_overwrite():
+    cache = SemanticCache(similarity_threshold=0.90, ttl_seconds=60, max_entries=10)
+    vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    q = "What is the incident budget?"
+
+    cache.store(q, vec, "full restricted answer", [{"doc": "r"}], clearance_level=3)
+    cache.store(q, vec, "partial internal answer", [{"doc": "i"}], clearance_level=1)
+    assert len(cache.cache) == 2
+
+    assert cache.lookup(q, vec, user_clearance=3)[0] == "full restricted answer"
+    assert cache.lookup(q, vec, user_clearance=1)[0] == "partial internal answer"
+
+
+def test_higher_clearance_never_served_lower_clearance_answer():
+    cache = SemanticCache(similarity_threshold=0.90, ttl_seconds=60, max_entries=10)
+    vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    cache.store("q", vec, "internal-only answer", [], clearance_level=1)
+
+    # The INTERNAL answer was built from fewer documents: a RESTRICTED user must miss
+    assert cache.lookup("q", vec, user_clearance=3) is None
+    # ...and a PUBLIC user must miss as well (insufficient clearance)
+    assert cache.lookup("q", vec, user_clearance=0) is None
+    assert cache.clearance_denials == 1  # only the PUBLIC lookup hit a higher-level entry
+
+
+def test_closer_entry_at_other_clearance_does_not_shadow_valid_entry():
+    cache = SemanticCache(similarity_threshold=0.90, ttl_seconds=60, max_entries=10)
+    exact = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    near = np.array([0.99, 0.141, 0.0], dtype=np.float32)
+    near /= np.linalg.norm(near)
+
+    cache.store("q-restricted", exact, "restricted answer", [], clearance_level=3)
+    cache.store("q-internal", near, "internal answer", [], clearance_level=1)
+
+    hit = cache.lookup("q", exact, user_clearance=1)
+    assert hit is not None and hit[0] == "internal answer"
+
+
+def test_invalidate_drops_entries_but_keeps_counters():
+    cache = SemanticCache(similarity_threshold=0.90, ttl_seconds=60, max_entries=10)
+    vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    cache.store("q", vec, "a", [], clearance_level=1)
+    assert cache.lookup("q", vec, user_clearance=1) is not None
+
+    cache.invalidate()
+    assert len(cache.cache) == 0
+    assert cache.hits == 1
+    assert cache.lookup("q", vec, user_clearance=1) is None

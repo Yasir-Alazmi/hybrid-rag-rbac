@@ -316,3 +316,127 @@ def test_invalid_bearer_token_is_strictly_rejected(test_client: TestClient):
     )
     assert res.status_code == 401
     assert "Invalid or unrecognized" in res.json()["detail"]
+
+
+def _ingest(test_client: TestClient, doc_id: str, content: str, classification: str):
+    res = test_client.post(
+        "/api/v1/ingest",
+        json={
+            "documents": [{
+                "id": doc_id, "title": doc_id, "content": content, "classification": classification
+            }],
+            "persist_to_disk": False,
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert res.status_code == 201
+
+
+def _cited(res) -> set:
+    return {c["document_id"] for c in res.json()["citations"]}
+
+
+def test_query_cache_is_scoped_to_exact_clearance(test_client: TestClient):
+    from src.api.routes import semantic_cache
+
+    _ingest(test_client, "kestrel_restricted", "Project Kestrel reserve fund is held in vault nine.", "RESTRICTED")
+    _ingest(test_client, "kestrel_internal", "Project Kestrel reserve fund questions go to finance.", "INTERNAL")
+    semantic_cache.invalidate()
+    body = {"query": "Where is the Project Kestrel reserve fund held?", "enable_cache": True}
+
+    admin_1 = test_client.post("/api/v1/query", json=body, headers=ADMIN_HEADERS)
+    assert admin_1.json()["cached"] is False
+    assert "kestrel_restricted" in _cited(admin_1)
+
+    # Employee must not get the admin's cached answer, and storing theirs must not overwrite it
+    emp = test_client.post("/api/v1/query", json=body, headers=EMPLOYEE_HEADERS)
+    assert emp.json()["cached"] is False
+    assert "kestrel_restricted" not in _cited(emp)
+
+    admin_2 = test_client.post("/api/v1/query", json=body, headers=ADMIN_HEADERS)
+    assert admin_2.json()["cached"] is True
+    assert "kestrel_restricted" in _cited(admin_2)
+
+    emp_2 = test_client.post("/api/v1/query", json=body, headers=EMPLOYEE_HEADERS)
+    assert "kestrel_restricted" not in _cited(emp_2)
+
+
+def test_ingest_and_delete_invalidate_query_cache(test_client: TestClient):
+    from src.api.routes import semantic_cache
+
+    _ingest(test_client, "heron_internal", "Project Heron launch window opens in spring.", "INTERNAL")
+    body = {"query": "When does the Project Heron launch window open?", "enable_cache": True}
+    test_client.post("/api/v1/query", json=body, headers=EMPLOYEE_HEADERS)
+    assert len(semantic_cache.cache) > 0
+
+    _ingest(test_client, "heron_update", "Project Heron launch window moved to autumn.", "INTERNAL")
+    assert len(semantic_cache.cache) == 0
+
+    test_client.post("/api/v1/query", json=body, headers=EMPLOYEE_HEADERS)
+    assert len(semantic_cache.cache) > 0
+    del_res = test_client.delete("/api/v1/documents/heron_update", headers=ADMIN_HEADERS)
+    assert del_res.status_code == 200
+    assert len(semantic_cache.cache) == 0
+    test_client.delete("/api/v1/documents/heron_internal", headers=ADMIN_HEADERS)
+
+
+def test_token_role_and_clearance_cannot_disagree(test_client: TestClient):
+    """Retrieval and cache both use the token's clearance, never the role name."""
+    from src.api.routes import semantic_cache
+
+    _ingest(test_client, "osprey_restricted", "Project Osprey settlement amount is sealed.", "RESTRICTED")
+    semantic_cache.invalidate()
+    body = {"query": "What is the Project Osprey settlement amount?", "enable_cache": True}
+
+    # role says admin, signed clearance says PUBLIC: must be treated as PUBLIC
+    low = create_jwt_token("svc-low", role="admin", clearance=ClassificationLevel.PUBLIC)
+    low_res = test_client.post("/api/v1/query", json=body, headers={"Authorization": f"Bearer {low}"})
+    assert low_res.status_code == 200
+    assert "osprey_restricted" not in _cited(low_res)
+
+    # A guest (PUBLIC) must not be served a restricted answer from the PUBLIC cache slot
+    guest_res = test_client.post("/api/v1/query", json=body, headers={"Authorization": "Bearer token-guest-public"})
+    assert "osprey_restricted" not in _cited(guest_res)
+    for (level, _), (_, entry) in semantic_cache.cache.items():
+        if level == ClassificationLevel.PUBLIC:
+            assert all(c["document_id"] != "osprey_restricted" for c in entry.citations)
+
+    # role says guest, signed clearance says RESTRICTED: clearance wins
+    high = create_jwt_token("svc-high", role="guest", clearance=ClassificationLevel.RESTRICTED)
+    high_res = test_client.post("/api/v1/query", json=body, headers={"Authorization": f"Bearer {high}"})
+    assert "osprey_restricted" in _cited(high_res)
+
+
+def test_ingest_rejects_unknown_classification(test_client: TestClient):
+    res = test_client.post(
+        "/api/v1/ingest",
+        json={
+            "documents": [{"id": "x", "title": "x", "content": "text", "classification": "TOPSECRET"}],
+            "persist_to_disk": False,
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert res.status_code == 422
+
+
+def test_production_startup_seeds_without_demo_tokens(monkeypatch, tmp_path):
+    """Startup seeding must not depend on demo tokens, which are off in production."""
+    from src.api import main, routes
+    from src.core.config import settings
+
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "jwt_secret_key", "test-only-secret-" + "x" * 32)
+    monkeypatch.setattr(routes, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(main, "STORAGE_DIR", tmp_path)
+    seeded = []
+    monkeypatch.setattr(main, "index_documents", lambda payload: seeded.append(payload))
+
+    with TestClient(main.app) as client:
+        assert client.get("/api/v1/health").status_code == 200
+        # Demo tokens are rejected in production
+        res = client.post(
+            "/api/v1/query", json={"query": "anything at all", "enable_cache": False},
+            headers={"Authorization": "Bearer token-ciso-root"},
+        )
+        assert res.status_code == 401
+    assert len(seeded) == 1 and len(seeded[0].documents) > 0

@@ -95,6 +95,9 @@ Baselines match published BEIR numbers. Full table, including the configurations
 - **HMAC-SHA256 JWT Decoding**: Validates cryptographic signatures, token expiration (`exp`), and tenant clearance claims (`sub`, `role`, `clearance`).
 - **Protected Administrative & Evaluation Endpoints**: `POST /api/v1/ingest`, `DELETE /api/v1/documents/{id}`, and `POST /api/v1/eval` require Bearer authorization with $\ge$ `CONFIDENTIAL` clearance. Unauthenticated calls return `HTTP 401 Unauthorized`; insufficient clearance calls return `HTTP 403 Forbidden`.
 - **Strict Header Enforcement**: Unrecognized or malformed tokens explicitly return `401 Unauthorized` rather than silently degrading permissions.
+- **Fail-Closed Defaults**: an unknown, empty or missing role gets `PUBLIC`; a chunk with an unknown or missing classification is never returned to anyone; ingest rejects unknown classification labels (`422`). A JWT `clearance` claim that is not an integer from 0 to 3 is rejected with `401`.
+- **One Clearance per Request**: the clearance resolved from the bearer token is the only value used for both retrieval filtering and cache scoping, so the two cannot disagree. For a JWT, the signed `clearance` claim wins over the role name; without a claim, the clearance comes from the role.
+- **Demo Tokens Outside Production Only**: the demo tokens in `src/core/security.py` are loaded only when `APP_ENV` is not `production`/`prod`. In production, only signed JWTs and tokens from `API_TOKENS_JSON` are accepted.
 - **Restricted CORS Policy**: Configurable, environment-governed allowed origins with strict method (`GET`, `POST`, `DELETE`, `OPTIONS`) and header filtering, with no wildcard origins on credentialed endpoints.
 
 ### 2. Dual-Mode Embedding Engine Interface (`src/retrieval/embeddings.py`)
@@ -109,7 +112,8 @@ Baselines match published BEIR numbers. Full table, including the configurations
 
 ### 4. Role-Scoped Semantic Cache
 - Caches query vectors and responses with bounded LRU eviction (1,000 entries).
-- **Privilege Boundary Enforcement**: Cache entries record `clearance_level`. An employee query will never receive a cached answer generated from an executive's restricted inquiry.
+- **Privilege Boundary Enforcement**: entries are keyed by `(clearance_level, query)` and served only to callers with exactly the same clearance. A lower-clearance user never gets a higher-clearance answer, and a higher-clearance user never gets a lower-clearance answer, which may be missing documents they are allowed to see.
+- **Invalidation**: the whole cache is dropped on every ingest and document delete, so cached answers never cite removed documents or miss new ones.
 
 ### 5. Evaluation & Stage Latency Tracking (`src/evaluation/`, `scripts/evaluate_rag.py`)
 - Computes retrieval and generation metrics:
@@ -229,7 +233,7 @@ hybrid-rag-rbac/
 │   ├── ingestion/                # Document parsing and recursive token chunker
 │   ├── reranker/                 # Lexical heuristic re-ranker (heuristic.py; not a neural cross-encoder)
 │   └── retrieval/                # Dual-mode embeddings, BM25, and hybrid RRF retriever
-├── tests/                        # pytest suite: 68 tests in 13 files
+├── tests/                        # pytest suite: 85 tests in 13 files
 ├── Dockerfile                    # Multi-stage container (non-root user)
 ├── docker-compose.yml            # Local service orchestration
 ├── pyproject.toml                # Build system & pytest configuration
@@ -277,8 +281,17 @@ uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 - Prometheus metrics: `http://localhost:8000/api/v1/metrics`
 - Health probe: `http://localhost:8000/api/v1/health`
 
-### 6. Query with Bearer Authentication (cURL)
-The tokens below (`token-ciso-root`, `token-admin-restricted`) are hard-coded demo tokens defined in `src/core/security.py`, for local use only. Use signed JWTs anywhere else.
+### 6. Run with Docker
+`docker-compose.yml` runs the API with `APP_ENV=production`, so it needs a real `JWT_SECRET_KEY` (the app refuses to start with the default one, and compose stops with an error if the variable is unset). The demo tokens are disabled in this mode; pass your own tokens through `API_TOKENS_JSON` or use signed JWTs.
+```bash
+export JWT_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export API_TOKENS_JSON='{"my-admin-token": ["admin", 3]}'   # optional
+docker compose up --build
+```
+The container runs a single uvicorn worker on purpose. The indexes and the semantic cache live in process memory, so with several workers each process would hold its own copy: an ingest or delete handled by one worker would not reach the others, and they would serve different, stale results. Scaling out needs shared stores first (see [Scaling notes](#scaling-notes-design-only-not-implemented)).
+
+### 7. Query with Bearer Authentication (cURL)
+The tokens below (`token-ciso-root`, `token-admin-restricted`) are hard-coded demo tokens defined in `src/core/security.py`. They are loaded only when `APP_ENV` is not production (for example with the local `uvicorn` command above), so they do not work under `docker compose`. Use signed JWTs or `API_TOKENS_JSON` anywhere else.
 
 ```bash
 # Query with a demo admin token

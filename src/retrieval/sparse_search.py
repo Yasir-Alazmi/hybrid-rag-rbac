@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from src.core.security import AccessControlManager
+from src.core.security import AccessControlManager, ClassificationLevel
 from src.ingestion.chunker import TextChunk
 
 
@@ -84,9 +84,15 @@ class BM25Index:
         self,
         query: str,
         top_k: int = 10,
-        user_role: Optional[str] = None
+        user_role: Optional[str] = None,
+        user_clearance: Optional[ClassificationLevel] = None,
     ) -> List[Tuple[str, float]]:
-        """Compute BM25 scores filtered by user clearance."""
+        """Compute BM25 scores filtered by user clearance.
+
+        RBAC always applies: with neither user_clearance nor user_role the caller gets
+        PUBLIC chunks only. Chunks with an unknown classification are never returned.
+        """
+        clearance = AccessControlManager.resolve_search_clearance(user_clearance, user_role)
         query_tokens = self.tokenize(query)
         if not query_tokens or self.doc_count == 0:
             return []
@@ -102,9 +108,10 @@ class BM25Index:
 
             for chunk_id, tf in self.inverted_index[term].items():
                 chunk = self.chunks_map.get(chunk_id)
-                if user_role and chunk:
-                    if not AccessControlManager.can_access(user_role, chunk.classification):
-                        continue
+                if chunk is None or not AccessControlManager.can_access_level(
+                    clearance, chunk.classification
+                ):
+                    continue
 
                 doc_len = self.doc_len.get(chunk_id, self.avg_doc_len)
                 denom = tf + self.k1 * (1.0 - self.b + self.b * (doc_len / max(1.0, self.avg_doc_len)))

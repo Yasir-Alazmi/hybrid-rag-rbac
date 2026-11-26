@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from src.core.security import ClassificationLevel
 from src.ingestion.chunker import TextChunk
 from src.retrieval.sparse_search import BM25Index
 from src.retrieval.vector_store import DenseVectorStore
@@ -58,7 +59,7 @@ def test_bm25_persistence(tmp_path: Path):
     success = new_index.load_from_disk(tmp_path)
     assert success is True
     assert "bm_01" in new_index.chunks_map
-    res = new_index.search("Disaster recovery")
+    res = new_index.search("Disaster recovery", user_clearance=ClassificationLevel.INTERNAL)
     assert len(res) > 0
 
 def test_empty_store_persistence(tmp_path: Path):

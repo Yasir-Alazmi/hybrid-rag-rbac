@@ -34,7 +34,8 @@ ROLE_CLEARANCE_MAP: Dict[str, ClassificationLevel] = {
     "executive": ClassificationLevel.RESTRICTED,
 }
 
-# Standard reference tokens for local environments and test verification
+# Demo tokens for local development and tests only. They are never loaded when
+# APP_ENV is production (see AccessControlManager.get_token_registry).
 DEFAULT_TOKEN_REGISTRY: Dict[str, Tuple[str, ClassificationLevel]] = {
     "token-admin-restricted": ("admin", ClassificationLevel.RESTRICTED),
     "token-ciso-root": ("ciso", ClassificationLevel.RESTRICTED),
@@ -56,7 +57,10 @@ def create_jwt_token(
     """Generate signed HMAC-SHA256 JWT for testing and machine-to-machine auth."""
     secret = secret_key or settings.jwt_secret_key
     algo = algorithm or settings.jwt_algorithm
-    assigned_clearance = clearance or ROLE_CLEARANCE_MAP.get(role.lower(), ClassificationLevel.INTERNAL)
+    if clearance is not None:
+        assigned_clearance = ClassificationLevel(clearance)
+    else:
+        assigned_clearance = AccessControlManager.get_user_clearance(role)
 
     payload: Dict[str, Any] = {
         "sub": subject,
@@ -85,12 +89,23 @@ def verify_jwt_token(
             algorithms=[algo],
             options={"require": ["exp", "sub", "role"]},
         )
-        role = str(decoded.get("role", "employee")).lower()
+        role = str(decoded["role"]).lower().strip()
         clearance_val = decoded.get("clearance")
-        if clearance_val is not None and isinstance(clearance_val, int):
+        if clearance_val is None:
+            # No explicit claim: derive from the role (unknown roles get PUBLIC).
+            return (role, AccessControlManager.get_user_clearance(role))
+        if isinstance(clearance_val, bool) or not isinstance(clearance_val, int):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication failed: JWT clearance claim must be an integer.",
+            )
+        try:
             clearance = ClassificationLevel(clearance_val)
-        else:
-            clearance = ROLE_CLEARANCE_MAP.get(role, ClassificationLevel.INTERNAL)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication failed: JWT clearance claim is out of range.",
+            )
         return (role, clearance)
     except jwt.ExpiredSignatureError:
         raise HTTPException(
@@ -109,8 +124,14 @@ class AccessControlManager:
 
     @classmethod
     def get_token_registry(cls) -> Dict[str, Tuple[str, ClassificationLevel]]:
-        """Resolve combined active token registry from settings and defaults."""
-        registry = dict(DEFAULT_TOKEN_REGISTRY)
+        """Resolve the active pre-shared token registry.
+
+        The demo DEFAULT_TOKEN_REGISTRY is included only outside production; in
+        production only tokens configured through API_TOKENS_JSON are accepted.
+        """
+        registry: Dict[str, Tuple[str, ClassificationLevel]] = {}
+        if not settings.is_production():
+            registry.update(DEFAULT_TOKEN_REGISTRY)
         if settings.api_tokens_json:
             try:
                 custom_tokens = json.loads(settings.api_tokens_json)
@@ -121,21 +142,60 @@ class AccessControlManager:
         return registry
 
     @staticmethod
-    def get_user_clearance(role: str) -> ClassificationLevel:
-        """Resolve role string to integer classification clearance level."""
-        normalized = role.lower().strip()
-        return ROLE_CLEARANCE_MAP.get(normalized, ClassificationLevel.INTERNAL)
+    def get_user_clearance(role: Optional[str]) -> ClassificationLevel:
+        """Resolve a role string to its clearance level.
+
+        Fail closed: an unknown, empty or missing role gets PUBLIC (the lowest level).
+        """
+        if not role:
+            return ClassificationLevel.PUBLIC
+        normalized = str(role).lower().strip()
+        return ROLE_CLEARANCE_MAP.get(normalized, ClassificationLevel.PUBLIC)
+
+    @staticmethod
+    def parse_classification(document_classification: Optional[str]) -> Optional[ClassificationLevel]:
+        """Parse a document classification label; returns None if it is not a known level."""
+        if not document_classification:
+            return None
+        try:
+            return ClassificationLevel[str(document_classification).upper().strip()]
+        except KeyError:
+            return None
 
     @classmethod
-    def can_access(cls, user_role: str, document_classification: str) -> bool:
-        """Verify if a user's role has sufficient clearance to read a classified document."""
-        user_clearance = cls.get_user_clearance(user_role)
-        try:
-            doc_level = ClassificationLevel[document_classification.upper().strip()]
-        except KeyError:
-            doc_level = ClassificationLevel.INTERNAL
+    def can_access_level(
+        cls, user_clearance: ClassificationLevel, document_classification: Optional[str]
+    ) -> bool:
+        """Check a clearance level against a document classification.
 
-        return user_clearance >= doc_level
+        Fail closed: a missing or unknown document classification is never readable.
+        """
+        doc_level = cls.parse_classification(document_classification)
+        if doc_level is None:
+            return False
+        return int(user_clearance) >= int(doc_level)
+
+    @classmethod
+    def resolve_search_clearance(
+        cls,
+        user_clearance: Optional[ClassificationLevel] = None,
+        user_role: Optional[str] = None,
+    ) -> ClassificationLevel:
+        """Pick the single clearance a retrieval call filters by.
+
+        Pass either an explicit clearance (what the API does) or a role. Passing both is
+        rejected so the two can never disagree; passing neither fails closed to PUBLIC.
+        """
+        if user_clearance is not None and user_role is not None:
+            raise ValueError("Pass user_clearance or user_role, not both.")
+        if user_clearance is not None:
+            return ClassificationLevel(user_clearance)
+        return cls.get_user_clearance(user_role)
+
+    @classmethod
+    def can_access(cls, user_role: Optional[str], document_classification: Optional[str]) -> bool:
+        """Verify if a user's role has sufficient clearance to read a classified document."""
+        return cls.can_access_level(cls.get_user_clearance(user_role or ""), document_classification)
 
     @classmethod
     def resolve_bearer_identity(

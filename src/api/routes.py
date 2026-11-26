@@ -103,6 +103,8 @@ def delete_document(
 
     v_del = vector_store.delete_document(document_id)
     b_del = bm25_index.delete_document(document_id)
+    # Cached answers may cite the deleted document: drop them all.
+    semantic_cache.invalidate()
 
     # Update persistent store
     vector_store.save_to_disk(STORAGE_DIR)
@@ -140,7 +142,15 @@ def ingest_documents(
         min_clearance=ClassificationLevel.CONFIDENTIAL,
         operation_name="document ingestion"
     )
+    return index_documents(payload)
 
+
+def index_documents(payload: IngestRequest) -> IngestResponse:
+    """Chunk, index and optionally persist documents. No auth check: callers must authorize.
+
+    Used by the ingest route (after the clearance check) and by the trusted startup seeding
+    in ``src.api.main``, which must work in production where demo tokens are disabled.
+    """
     all_chunks: List[TextChunk] = []
     for doc_payload in payload.documents:
         doc = Document(
@@ -161,6 +171,9 @@ def ingest_documents(
             vector_store.save_to_disk(STORAGE_DIR)
             bm25_index.save_to_disk(STORAGE_DIR)
 
+        # New documents can change the right answer: cached answers are stale.
+        semantic_cache.invalidate()
+
     logger.info("Ingested %d documents (%d chunks)", len(payload.documents), len(all_chunks))
     return IngestResponse(
         indexed_documents=len(payload.documents),
@@ -177,8 +190,10 @@ def query_pipeline(
     """Execute end-to-end Generative RAG with Bearer Auth, RBAC, and role-scoped caching."""
     start_time = time.perf_counter()
 
-    # 1. Bearer Token Identity Resolution (Zero-trust: header is sole source of truth)
-    resolved_role, clearance = AccessControlManager.resolve_bearer_identity(
+    # 1. Bearer Token Identity Resolution (Zero-trust: header is sole source of truth).
+    # The resolved clearance is the single value used for retrieval filtering and for
+    # cache scoping, so the two can never disagree.
+    _, clearance = AccessControlManager.resolve_bearer_identity(
         auth_header=authorization,
         require_auth=False
     )
@@ -229,7 +244,7 @@ def query_pipeline(
     candidates = hybrid_retriever.search(
         sanitized_query,
         top_k=request.top_k * 2,
-        user_role=resolved_role
+        user_clearance=clearance
     )
 
     if not candidates:

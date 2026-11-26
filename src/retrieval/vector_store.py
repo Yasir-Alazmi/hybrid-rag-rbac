@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.core.logging import get_logger
-from src.core.security import AccessControlManager
+from src.core.security import AccessControlManager, ClassificationLevel
 from src.ingestion.chunker import TextChunk
 from src.retrieval.embeddings import BaseEmbeddingEngine, DeterministicHashingEmbedding
 
@@ -59,9 +59,15 @@ class DenseVectorStore:
         self,
         query: str,
         top_k: int = 10,
-        user_role: Optional[str] = None
+        user_role: Optional[str] = None,
+        user_clearance: Optional[ClassificationLevel] = None,
     ) -> List[Tuple[str, float]]:
-        """Compute cosine similarity filtered by user clearance."""
+        """Compute cosine similarity filtered by user clearance.
+
+        RBAC always applies: with neither user_clearance nor user_role the caller gets
+        PUBLIC chunks only. Chunks with an unknown classification are never returned.
+        """
+        clearance = AccessControlManager.resolve_search_clearance(user_clearance, user_role)
         if not self.vectors:
             return []
 
@@ -73,9 +79,10 @@ class DenseVectorStore:
         scores: List[Tuple[str, float]] = []
         for chunk_id, doc_vec in self.vectors.items():
             chunk = self.chunks_map.get(chunk_id)
-            if user_role and chunk:
-                if not AccessControlManager.can_access(user_role, chunk.classification):
-                    continue
+            if chunk is None or not AccessControlManager.can_access_level(
+                clearance, chunk.classification
+            ):
+                continue
 
             sim = float(np.dot(query_vec, doc_vec))
             scores.append((chunk_id, sim))

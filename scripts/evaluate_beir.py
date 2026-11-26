@@ -111,7 +111,10 @@ def main():
     if args.limit:
         queries = dict(list(queries.items())[: args.limit])
     chunks = [
-        TextChunk(chunk_id=i, document_id=i, content=t, chunk_index=0, token_count=len(t.split()))
+        TextChunk(
+            chunk_id=i, document_id=i, content=t, chunk_index=0, token_count=len(t.split()),
+            classification="PUBLIC",  # public benchmark corpus; RBAC filtering keeps every doc
+        )
         for i, t in corpus.items()
     ]
     print(f"corpus {len(chunks)} docs, {len(queries)} test queries", flush=True)

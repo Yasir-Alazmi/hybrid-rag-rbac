@@ -2,6 +2,7 @@
 
 from typing import Dict, List, Optional, Tuple
 
+from src.core.security import AccessControlManager, ClassificationLevel
 from src.ingestion.chunker import TextChunk
 from src.retrieval.sparse_search import BM25Index
 from src.retrieval.vector_store import DenseVectorStore
@@ -19,11 +20,17 @@ class HybridRetriever:
         self,
         query: str,
         top_k: int = 5,
-        user_role: Optional[str] = None
+        user_role: Optional[str] = None,
+        user_clearance: Optional[ClassificationLevel] = None,
     ) -> List[Tuple[TextChunk, float]]:
-        """Execute hybrid retrieval with Reciprocal Rank Fusion and RBAC filtering."""
-        sparse_results = self.bm25_index.search(query, top_k=top_k * 2, user_role=user_role)
-        dense_results = self.vector_store.search(query, top_k=top_k * 2, user_role=user_role)
+        """Execute hybrid retrieval with Reciprocal Rank Fusion and RBAC filtering.
+
+        Filtering uses one clearance (see AccessControlManager.resolve_search_clearance);
+        with neither argument it falls back to PUBLIC.
+        """
+        clearance = AccessControlManager.resolve_search_clearance(user_clearance, user_role)
+        sparse_results = self.bm25_index.search(query, top_k=top_k * 2, user_clearance=clearance)
+        dense_results = self.vector_store.search(query, top_k=top_k * 2, user_clearance=clearance)
 
         rrf_scores: Dict[str, float] = {}
         rrf_k = 60.0

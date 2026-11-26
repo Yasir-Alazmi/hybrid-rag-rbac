@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.middleware import SlidingWindowRateLimiter, TelemetryMiddleware
-from src.api.routes import STORAGE_DIR, bm25_index, ingest_documents, router, vector_store
+from src.api.routes import STORAGE_DIR, bm25_index, index_documents, router, vector_store
 from src.api.schemas import DocumentPayload, IngestRequest
 from src.core.config import settings
 from src.core.logging import get_logger
@@ -50,10 +50,9 @@ async def lifespan(app: FastAPI):
                     logger.error("Failed to load sample doc %s: %s", file_path.name, e)
 
             if docs_to_ingest:
-                ingest_documents(
-                    IngestRequest(documents=docs_to_ingest, persist_to_disk=True),
-                    authorization="Bearer token-admin-restricted"
-                )
+                # Trusted local seeding: index directly, without a bearer token, so this
+                # also works in production where the demo tokens are disabled.
+                index_documents(IngestRequest(documents=docs_to_ingest, persist_to_disk=True))
                 logger.info("Pre-indexed and persisted %d sample documents", len(docs_to_ingest))
 
     yield

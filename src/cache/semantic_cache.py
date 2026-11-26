@@ -1,4 +1,12 @@
-"""Bounded LRU semantic query cache with Role-Based Access Control scoping."""
+"""Bounded LRU semantic query cache with Role-Based Access Control scoping.
+
+Scoping rule: an entry is keyed by ``(clearance_level, query)`` and is only ever
+served to a caller with exactly the same clearance level. A lower-clearance caller
+must not see a higher-clearance answer, and a higher-clearance caller must not get a
+lower-clearance answer either, because that answer was built from fewer documents
+and may be incomplete. The cache must be invalidated whenever the indexed corpus
+changes (the API does this on ingest and delete).
+"""
 
 import time
 from collections import OrderedDict
@@ -16,6 +24,9 @@ class CacheEntry(BaseModel):
     created_at: float = Field(default_factory=time.time)
     last_accessed: float = Field(default_factory=time.time)
 
+CacheKey = Tuple[int, str]
+
+
 class SemanticCache:
     """Role-scoped bounded vector cache with LRU eviction and zero cross-clearance leakage."""
 
@@ -23,7 +34,7 @@ class SemanticCache:
         self.similarity_threshold = similarity_threshold
         self.ttl_seconds = ttl_seconds
         self.max_entries = max_entries
-        self.cache: OrderedDict[str, Tuple[np.ndarray, CacheEntry]] = OrderedDict()
+        self.cache: OrderedDict[CacheKey, Tuple[np.ndarray, CacheEntry]] = OrderedDict()
         self.hits: int = 0
         self.misses: int = 0
         self.evictions: int = 0
@@ -33,9 +44,15 @@ class SemanticCache:
         self,
         query: str,
         query_embedding: np.ndarray,
-        user_clearance: int = 1
+        user_clearance: int = 0
     ) -> Optional[Tuple[str, List[Dict[str, Any]], float]]:
-        """Look up similar past queries, strictly enforcing that user_clearance >= cached clearance_level."""
+        """Look up a similar past query cached at exactly ``user_clearance``.
+
+        Entries stored at any other clearance level are never considered, so a closer
+        match at another level cannot shadow a valid one. ``clearance_denials`` counts
+        lookups that missed only because the matching entry belongs to a higher level.
+        """
+        user_clearance = int(user_clearance)
         now = time.time()
 
         # Purge expired entries
@@ -53,29 +70,29 @@ class SemanticCache:
             return None
 
         best_score = -1.0
-        best_key: Optional[str] = None
+        best_key: Optional[CacheKey] = None
         best_entry: Optional[CacheEntry] = None
+        higher_level_match = False
 
         for key, (cached_vec, entry) in self.cache.items():
             score = float(np.dot(query_embedding, cached_vec))
+            if entry.clearance_level != user_clearance:
+                if entry.clearance_level > user_clearance and score >= self.similarity_threshold:
+                    higher_level_match = True
+                continue
             if score > best_score:
                 best_score = score
                 best_key = key
                 best_entry = entry
 
         if best_score >= self.similarity_threshold and best_entry is not None and best_key is not None:
-            # Enforce Role Clearance Scoping
-            if user_clearance < best_entry.clearance_level:
-                # User has insufficient clearance to view this cached answer!
-                self.clearance_denials += 1
-                self.misses += 1
-                return None
-
             self.hits += 1
             best_entry.last_accessed = now
             self.cache.move_to_end(best_key)
             return best_entry.response, best_entry.citations, round(best_score, 4)
 
+        if higher_level_match:
+            self.clearance_denials += 1
         self.misses += 1
         return None
 
@@ -85,13 +102,16 @@ class SemanticCache:
         query_embedding: np.ndarray,
         response: str,
         citations: List[Dict[str, Any]],
-        clearance_level: int = 1
+        clearance_level: int = 0
     ) -> None:
         """Store a query-response pair bound to its security clearance level."""
         if query_embedding is None:
             return
 
-        if len(self.cache) >= self.max_entries:
+        key: CacheKey = (int(clearance_level), query)
+        if key in self.cache:
+            del self.cache[key]
+        elif len(self.cache) >= self.max_entries:
             self.cache.popitem(last=False)
             self.evictions += 1
 
@@ -99,11 +119,11 @@ class SemanticCache:
             query=query,
             response=response,
             citations=citations,
-            clearance_level=clearance_level,
+            clearance_level=int(clearance_level),
             created_at=time.time(),
             last_accessed=time.time()
         )
-        self.cache[query] = (query_embedding, entry)
+        self.cache[key] = (query_embedding, entry)
 
     def stats(self) -> Dict[str, Any]:
         """Return cache health, evictions, and clearance denial statistics."""
@@ -120,6 +140,10 @@ class SemanticCache:
             "similarity_threshold": self.similarity_threshold,
             "ttl_seconds": self.ttl_seconds
         }
+
+    def invalidate(self) -> None:
+        """Drop all cached answers but keep the hit/miss counters (used when the corpus changes)."""
+        self.cache.clear()
 
     def clear(self) -> None:
         """Clear cache state."""
