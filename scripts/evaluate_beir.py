@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.ingestion.chunker import TextChunk  # noqa: E402
-from src.reranker.cross_encoder import CrossEncoderReranker  # noqa: E402
+from src.reranker.heuristic import HeuristicReranker  # noqa: E402
 from src.retrieval.embeddings import DeterministicHashingEmbedding, SentenceTransformerEmbedding  # noqa: E402
 from src.retrieval.hybrid_retriever import HybridRetriever  # noqa: E402
 from src.retrieval.sparse_search import BM25Index  # noqa: E402
@@ -128,7 +128,7 @@ def main():
             neural_note = "all-MiniLM-L6-v2 via sentence-transformers"
         else:
             neural_note = "sentence-transformers not installed"
-    rerank = CrossEncoderReranker(top_k=100)
+    rerank = HeuristicReranker(top_k=100)
     for tag, eng in engines:
         vs = DenseVectorStore(embedding_engine=eng)
         t = time.perf_counter()

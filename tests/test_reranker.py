@@ -1,11 +1,11 @@
-"""Unit tests for cross-encoder reranking."""
+"""Unit tests for the lexical heuristic re-ranker."""
 
 from src.ingestion.chunker import TextChunk
-from src.reranker.cross_encoder import CrossEncoderReranker
+from src.reranker.heuristic import HeuristicReranker
 
 
-def test_cross_encoder_rerank():
-    reranker = CrossEncoderReranker(top_k=2)
+def test_heuristic_rerank():
+    reranker = HeuristicReranker(top_k=2)
 
     chunk_a = TextChunk(
         chunk_id="c1", document_id="doc1",
@@ -26,3 +26,9 @@ def test_cross_encoder_rerank():
     # chunk_a should be reranked to position 1 due to high term overlap and coverage
     assert reranked[0][0].chunk_id == "c1"
     assert reranked[0][1] > reranked[1][1]
+
+
+def test_legacy_cross_encoder_alias():
+    from src.reranker.cross_encoder import CrossEncoderReranker
+
+    assert CrossEncoderReranker is HeuristicReranker

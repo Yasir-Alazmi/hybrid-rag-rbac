@@ -64,7 +64,7 @@ def create_jwt_token(
         "clearance": int(assigned_clearance),
         "iat": int(time.time()),
         "exp": int(time.time() + expires_in_seconds),
-        "iss": "enterprise-production-rag",
+        "iss": "hybrid-rag-rbac",
     }
     return jwt.encode(payload, secret, algorithm=algo)
 

@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    app_name: str = Field(default="enterprise-production-rag")
+    app_name: str = Field(default="hybrid-rag-rbac")
     app_env: str = Field(default="development")
     log_level: str = Field(default="INFO")
 
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
             flat: Dict[str, Any] = {}
             if "app" in raw:
-                flat["app_name"] = raw["app"].get("name", "enterprise-production-rag")
+                flat["app_name"] = raw["app"].get("name", "hybrid-rag-rbac")
                 flat["app_env"] = raw["app"].get("environment", "development")
                 flat["log_level"] = raw["app"].get("log_level", "INFO")
                 if "cors_allowed_origins" in raw["app"]:

@@ -27,7 +27,7 @@ from src.guardrails.injection_detector import InjectionDetector
 from src.guardrails.pii_sanitizer import PIISanitizer
 from src.ingestion.chunker import RecursiveTokenChunker, TextChunk
 from src.ingestion.parser import Document
-from src.reranker.cross_encoder import CrossEncoderReranker
+from src.reranker.heuristic import HeuristicReranker
 from src.retrieval.embeddings import get_embedding_engine
 from src.retrieval.hybrid_retriever import HybridRetriever
 from src.retrieval.sparse_search import BM25Index
@@ -50,7 +50,7 @@ vector_store = DenseVectorStore(
     embedding_engine=embedding_engine
 )
 hybrid_retriever = HybridRetriever(bm25_index=bm25_index, vector_store=vector_store, alpha=settings.hybrid_alpha)
-reranker = CrossEncoderReranker(top_k=settings.rerank_top_k)
+reranker = HeuristicReranker(top_k=settings.rerank_top_k)
 generator = get_answer_generator(provider=settings.generation_provider)
 sanitizer = PIISanitizer()
 injection_detector = InjectionDetector()

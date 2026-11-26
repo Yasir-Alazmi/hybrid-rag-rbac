@@ -1,1 +1,1 @@
-"""Cross-encoder re-ranking algorithms."""
+"""Lexical heuristic re-ranking."""

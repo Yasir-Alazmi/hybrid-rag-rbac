@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "enterprise-production-rag"
+name = "hybrid-rag-rbac"
 version = "0.1.0"
-description = "Production-grade, enterprise-scale hybrid retrieval-augmented generation engine."
+description = "Reference implementation of hybrid (BM25 + dense, RRF) retrieval-augmented generation with role-based access control."
 readme = "README.md"
 authors = [{ name = "Yasir Alazmi", email = "yasir.alazmi@outlook.sa" }]
 license = { text = "MIT" }

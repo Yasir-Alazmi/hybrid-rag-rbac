@@ -1,13 +1,44 @@
-# Hybrid RAG Reference Implementation
+# Hybrid RAG with Role-Based Access
 
-[![CI](https://github.com/Yasir-Alazmi/enterprise-production-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/Yasir-Alazmi/enterprise-production-rag/actions)
+[![CI](https://github.com/Yasir-Alazmi/hybrid-rag-rbac/actions/workflows/ci.yml/badge.svg)](https://github.com/Yasir-Alazmi/hybrid-rag-rbac/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Prometheus](https://img.shields.io/badge/Prometheus-Metrics-E6522C?style=flat-square&logo=prometheus&logoColor=white)](https://prometheus.io/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 
-A small reference implementation of role-based hybrid Retrieval-Augmented Generation (RAG): JWT authentication with role-based access control applied inside retrieval, BM25 + dense retrieval fused with Reciprocal Rank Fusion, prompt-injection and PII guards, and a role-scoped semantic cache. It is a learning and architecture project: it has not been deployed or load-tested, and its default components are lightweight stand-ins (see [What the components really are](#what-the-components-really-are)). Retrieval quality is measured on a public benchmark below.
+A small reference implementation of role-based hybrid Retrieval-Augmented Generation (RAG): JWT authentication with role-based access control applied inside retrieval, BM25 + dense retrieval fused with Reciprocal Rank Fusion, prompt-injection and PII guards, and a role-scoped semantic cache. It is a learning and architecture project: it has not been deployed or load-tested, and its default components are lightweight stand-ins (see [What the components really are](#what-the-components-really-are)).
+
+### Result: BEIR SciFact (5,183 abstracts, 300 queries, CPU)
+
+| Retrieval | nDCG@10 | Recall@100 | p50 ms |
+|---|---|---|---|
+| BM25 only | 0.661 | 0.876 | 13.84 |
+| Dense (all-MiniLM-L6-v2) | 0.648 | 0.925 | 22.32 |
+| **Hybrid BM25 + MiniLM (RRF)** | **0.679** | **0.955** | 44.81 |
+
+Hybrid fusion finds more of the relevant documents (Recall@100 0.876 → 0.955) for about 31 ms of extra p50 latency over BM25.
+Baselines match published BEIR numbers. Full table, including the configurations that did *not* help: [below](#retrieval-quality-on-beir-scifact-scriptsevaluate_beirpy). To reproduce it, see [Quickstart step 3](#3-reproduce-the-beir-scifact-benchmark).
+
+### What I learned
+
+- **Fusion mainly helps recall.** Hybrid retrieval adds +0.018 nDCG@10 over BM25 but lifts Recall@100 from 0.876 to 0.955, which is what matters for a RAG first stage.
+- **A non-semantic default halves quality.** With the default hashing embedding, hybrid retrieval scores 0.346 nDCG@10, about half of BM25 alone (0.661).
+- **The heuristic re-ranker hurts a strong first stage.** It adds +0.145 on the hashing hybrid but costs -0.032 on the neural hybrid.
+
+---
+
+## What the components really are
+
+| Component | Name in the code | What it actually is |
+| :--- | :--- | :--- |
+| Default embedding | `DeterministicHashingEmbedding` | Token sign-hash projection, not semantic; for CI and tests |
+| Neural embedding | `SentenceTransformerEmbedding` | `all-MiniLM-L6-v2` when installed |
+| Re-ranker | `HeuristicReranker` (`src/reranker/heuristic.py`) | Hand-written lexical heuristic (coverage, density, position), not a trained cross-encoder; the old name `CrossEncoderReranker` is kept as an import alias |
+| Default generator | `DeterministicGroundedGenerator` | Extractive: stitches retrieved sentences and adds citations; no language model |
+| Optional generator | `LLMAnswerGenerator` | Calls an OpenAI-compatible or Ollama endpoint; not exercised in the benchmark |
+| Vector store | `DenseVectorStore` | In-memory brute-force cosine scan with JSON persistence |
+| Evaluation corpus (default) | Golden Reference Corpus | 2 documents and 4 queries |
 
 ---
 
@@ -21,7 +52,7 @@ A small reference implementation of role-based hybrid Retrieval-Augmented Genera
         (HMAC-SHA256 JWT / API Tokens: PUBLIC < INTERNAL < CONFIDENTIAL < RESTRICTED)
                                │
                                ▼
-        [ Protected FastAPI Gateway (/api/v1/query, /ingest, /documents/{id}, /eval) ]
+        [ FastAPI endpoints (/api/v1/query, /ingest, /documents/{id}, /eval) ]
                                 │
         ┌───────────────────────┴───────────────────────┐
         ▼                                               ▼
@@ -30,7 +61,7 @@ A small reference implementation of role-based hybrid Retrieval-Augmented Genera
         │                                               │
         └───────────────────────┬───────────────────────┘
                                 ▼
-             [ Role-Scoped Bounded Semantic Cache ] ──(Hit)──► Return Cached Answer (< 2ms)
+             [ Role-Scoped Bounded Semantic Cache ] ──(Hit)──► Return cached answer
                                 │ (Miss)
                                 ▼
             [ Role-Based Access Control (RBAC Filter) ]
@@ -43,11 +74,11 @@ A small reference implementation of role-based hybrid Retrieval-Augmented Genera
                                 │
                                 ▼
                   [ Heuristic Re-Ranking ]
-                  (Joint Query-Document Interaction)
+                  (lexical heuristic, not a trained model)
                                 │
                                 ▼
              [ Pluggable Answer Generation Abstraction ]
-             ├── Deterministic Grounded Synthesis (Offline, Zero Hallucination)
+             ├── Extractive answer with citations (offline, no LLM)
              └── Live LLM Generator (OpenAI / Local Ollama via HTTPX)
                                 │
                                 ▼
@@ -58,13 +89,13 @@ A small reference implementation of role-based hybrid Retrieval-Augmented Genera
 
 ---
 
-## Core Engineering Capabilities
+## Components
 
 ### 1. Identity, RBAC & API Hardening (`src/core/security.py`, `src/api/main.py`)
 - **HMAC-SHA256 JWT Decoding**: Validates cryptographic signatures, token expiration (`exp`), and tenant clearance claims (`sub`, `role`, `clearance`).
-- **Protected Administrative & Evaluation Endpoints**: `POST /api/v1/ingest`, `DELETE /api/v1/documents/{id}`, and `POST /api/v1/eval` strictly require Bearer authorization with $\ge$ `CONFIDENTIAL` clearance. Unauthenticated calls return `HTTP 401 Unauthorized`; insufficient clearance calls return `HTTP 403 Forbidden`.
+- **Protected Administrative & Evaluation Endpoints**: `POST /api/v1/ingest`, `DELETE /api/v1/documents/{id}`, and `POST /api/v1/eval` require Bearer authorization with $\ge$ `CONFIDENTIAL` clearance. Unauthenticated calls return `HTTP 401 Unauthorized`; insufficient clearance calls return `HTTP 403 Forbidden`.
 - **Strict Header Enforcement**: Unrecognized or malformed tokens explicitly return `401 Unauthorized` rather than silently degrading permissions.
-- **Restricted CORS Policy**: Configurable, environment-governed allowed origins with strict method (`GET`, `POST`, `DELETE`, `OPTIONS`) and header filtering, completely eliminating wildcard origin exposure on credentialed endpoints.
+- **Restricted CORS Policy**: Configurable, environment-governed allowed origins with strict method (`GET`, `POST`, `DELETE`, `OPTIONS`) and header filtering, with no wildcard origins on credentialed endpoints.
 
 ### 2. Dual-Mode Embedding Engine Interface (`src/retrieval/embeddings.py`)
 - **Interface Contract (`BaseEmbeddingEngine`)**: Decouples the vector store and cache from underlying embedding algorithms.
@@ -74,14 +105,14 @@ A small reference implementation of role-based hybrid Retrieval-Augmented Genera
 ### 3. Pluggable Answer Generation Abstraction (`src/generation/generator.py`)
 - **Protocol Contract (`BaseAnswerGenerator`)**: Supports interchangeable synthesis backends via factory configuration (`GENERATION_PROVIDER`).
 - **`DeterministicGroundedGenerator`**: Extractive factual synthesis that combines facts across retrieved chunks, appends verified section citations `[Document Title - Section]`, and deterministically refuses insufficient context (*"Insufficient enterprise documentation was retrieved to answer this query with verifiable certainty"*).
-- **`LLMAnswerGenerator`**: Pluggable live generation adapter calling OpenAI-compatible APIs or local Ollama endpoints via `httpx`, conditioned with strict anti-hallucination system instructions.
+- **`LLMAnswerGenerator`**: Pluggable live generation adapter calling OpenAI-compatible APIs or local Ollama endpoints via `httpx`, with a system prompt that tells the model to answer only from the retrieved context.
 
-### 4. Role-Scoped Semantic Cache (Zero Privilege Escalation)
+### 4. Role-Scoped Semantic Cache
 - Caches query vectors and responses with bounded LRU eviction (1,000 entries).
 - **Privilege Boundary Enforcement**: Cache entries record `clearance_level`. An employee query will never receive a cached answer generated from an executive's restricted inquiry.
 
-### 5. Automated Evaluation Suite & Stage Latency Tracking (`src/evaluation/`, `scripts/evaluate_rag.py`)
-- Computes empirical information retrieval and generation metrics:
+### 5. Evaluation & Stage Latency Tracking (`src/evaluation/`, `scripts/evaluate_rag.py`)
+- Computes retrieval and generation metrics:
   - Context Precision@K, Context Recall@K
   - Mean Reciprocal Rank (MRR)
   - Normalized Discounted Cumulative Gain (NDCG@5)
@@ -90,9 +121,9 @@ A small reference implementation of role-based hybrid Retrieval-Augmented Genera
 
 ---
 
-## Empirical Benchmark & Evaluation Results
+## Benchmarks and evaluation
 
-### Retrieval quality on a public benchmark (`scripts/evaluate_beir.py`)
+### Retrieval quality on BEIR SciFact (`scripts/evaluate_beir.py`)
 
 BEIR **SciFact**: 5,183 scientific abstracts, 300 test queries with relevance judgements. Each row uses this repository's own components on the same corpus. Latency is one query at a time on a CPU (Windows 11, Python 3.12, no GPU); full output in [`results/beir_scifact.md`](results/beir_scifact.md).
 
@@ -114,7 +145,9 @@ What the numbers say:
 - **The heuristic re-ranker helps weak first stages and hurts strong ones**: +0.145 on the hashing hybrid, -0.032 on the neural hybrid. It is a hand-written scoring function (query-term coverage, density, position), not a trained cross-encoder.
 - **Latency is tens of milliseconds at 5,183 documents** (p50 13.8 ms for BM25, 44.8 ms for neural hybrid), not the 2 ms measured below on a two-document corpus. The vector store is a brute-force in-memory scan, so it will not scale to millions of documents without a real index.
 
-### Performance Benchmark (`scripts/benchmark.py`)
+<details>
+<summary>Latency on the two-document sample corpus (<code>scripts/benchmark.py</code>)</summary>
+
 **Corpus: two sample documents.** These latencies measure the pipeline overhead on a tiny corpus and say nothing about performance at realistic size (see the benchmark above). Measured locally across 100 consecutive requests on Windows (AMD64, Python 3.13):
 
 | Performance Metric | Cold Hybrid Retrieval + Synthesis | Semantic Cache Hit |
@@ -123,48 +156,37 @@ What the numbers say:
 | **p95 Latency** | **2.86 ms** | **2.44 ms** |
 | **p99 Latency** | **4.02 ms** | **2.67 ms** |
 | **Mean Execution Time** | **2.44 ms** | **2.08 ms** |
-| **Throughput Capacity** | > 400 req/sec | > 500 req/sec |
-| **Automated Test Suite** | 67 tests passing (verified 2026-11-15) | 14 test files |
 
-> **Benchmark Scope Note**: Latency covers full Ingestion -> PII Sanitization -> Injection Screening -> Role-Scoped Cache -> Hybrid Retrieval -> Heuristic Re-Ranker -> Deterministic Grounded Synthesis. Live third-party external LLM API calls incur separate network roundtrips (~300ms - 1500ms).
+> **Benchmark Scope Note**: Latency covers full Ingestion -> PII Sanitization -> Injection Screening -> Role-Scoped Cache -> Hybrid Retrieval -> Heuristic Re-Ranker -> Deterministic Grounded Synthesis. Calls to an external LLM API are not included.
 
+</details>
 
-### Automated RAG Evaluation Report (`scripts/evaluate_rag.py`)
+<details>
+<summary>Regression evaluation on the sample corpus (<code>scripts/evaluate_rag.py</code>)</summary>
+
 **This is a regression test, not a quality estimate.** It runs 4 queries against 2 sample documents (with ground-truth documents and PII/injection checks); with n = 4 each metric moves in large steps. Use the SciFact benchmark above for retrieval quality.
 
-| Evaluation Metric | Aggregate Score | Target SLA |
-| :--- | :--- | :--- |
-| **Mean Context Precision@K** | **0.833** | > 0.80 |
-| **Mean Context Recall@K** | **1.000** | > 0.90 |
-| **Mean Reciprocal Rank (MRR)** | **0.833** | > 0.80 |
-| **Mean NDCG@5** | **0.875** | > 0.85 |
-| **Answer Faithfulness** | **0.875** | > 0.85 (Strict Context Grounding) |
-| **Answer Citation Correctness** | **1.000** | 1.00 (Zero Hallucinated Sources) |
-| **Mean Retrieval Latency** | **0.22 ms** | < 5.00 ms |
-| **Mean Generation Latency (Local)** | **0.10 ms** | < 5.00 ms |
+| Evaluation Metric | Aggregate Score |
+| :--- | :--- |
+| **Mean Context Precision@K** | **0.833** |
+| **Mean Context Recall@K** | **1.000** |
+| **Mean Reciprocal Rank (MRR)** | **0.833** |
+| **Mean NDCG@5** | **0.875** |
+| **Answer Faithfulness** | **0.875** |
+| **Answer Citation Correctness** | **1.000** |
+| **Mean Retrieval Latency** | **0.22 ms** |
+| **Mean Generation Latency (Local)** | **0.10 ms** |
 
----
-
-## What the components really are
-
-| Component | Name in the code | What it actually is |
-| :--- | :--- | :--- |
-| Default embedding | `DeterministicHashingEmbedding` | Token sign-hash projection, not semantic; for CI and tests |
-| Neural embedding | `SentenceTransformerEmbedding` | `all-MiniLM-L6-v2` when installed |
-| Re-ranker | `CrossEncoderReranker` | Hand-written lexical heuristic (coverage, density, position); the class name is historical |
-| Default generator | `DeterministicGroundedGenerator` | Extractive: stitches retrieved sentences and adds citations; no language model |
-| Optional generator | `LLMAnswerGenerator` | Calls an OpenAI-compatible or Ollama endpoint; not exercised in the benchmark |
-| Vector store | `DenseVectorStore` | In-memory brute-force cosine scan with JSON persistence |
-| Evaluation corpus (default) | Golden Reference Corpus | 2 documents and 4 queries |
+</details>
 
 ---
 
 ## Scaling notes (design only, not implemented)
 
-This repository is architected as a clean reference platform. For horizontal scaling in multi-node Kubernetes clusters, migrate components following this blueprint:
+Everything runs in one process with in-memory stores. Moving to several nodes would mean replacing each component roughly as follows:
 
 ```
-[ In-Memory Reference ]                [ Enterprise Cloud Target ]
+[ In-Memory Reference ]                [ Possible replacement ]
 DenseVectorStore (JSON + SHA256)  ──►  PostgreSQL + pgvector / Qdrant Cloud
 BM25Index (Inverted Index)        ──►  Elasticsearch / OpenSearch
 SemanticCache (In-Memory LRU)     ──►  Redis Cluster with RedisVL (RediSearch)
@@ -179,21 +201,24 @@ Detailed migration schemas, SQL DDL, and configuration examples are documented i
 ## Directory Structure
 
 ```
-enterprise-production-rag/
+hybrid-rag-rbac/
 ├── .github/workflows/ci.yml       # GitHub Actions CI matrix (Python 3.10 & 3.11)
-├── configs/config.yaml            # Centralized hyperparameter & security configuration
+├── configs/config.yaml            # Retrieval, cache and security settings
 ├── data/
-│   ├── sample_documents/         # Compliance & Security SLA documents
+│   ├── sample_documents/         # Two sample policy documents
 │   └── storage/                  # Persistent vector snapshots with SHA256 verification
 ├── docs/
-│   ├── architecture.md           # Engineering trade-offs and enterprise scaling blueprints
+│   ├── architecture.md           # Design trade-offs and scaling notes
 │   └── runbook.md                # Day-2 operations, key rotation, and Prometheus alerts
 ├── results/
-│   ├── benchmark_report.json     # Empirical latency percentiles and system metadata
+│   ├── beir_scifact.json         # BEIR SciFact retrieval benchmark (raw)
+│   ├── beir_scifact.md           # BEIR SciFact retrieval benchmark (table)
+│   ├── benchmark_report.json     # Latency percentiles on the 2-document sample corpus
 │   └── evaluation_report.json    # Precision, Recall, MRR, and NDCG evaluation metrics
 ├── scripts/
-│   ├── benchmark.py              # Performance benchmark harness (p50/p95/p99)
-│   └── evaluate_rag.py           # Automated RAG evaluation on golden reference corpus
+│   ├── benchmark.py              # Latency benchmark harness (p50/p95/p99)
+│   ├── evaluate_beir.py          # BEIR SciFact retrieval benchmark
+│   └── evaluate_rag.py           # Regression evaluation on the 2-document sample corpus
 ├── src/
 │   ├── api/                      # FastAPI routes, schemas, and rate-limiting middleware
 │   ├── cache/                    # Role-scoped bounded LRU semantic query cache
@@ -202,54 +227,61 @@ enterprise-production-rag/
 │   ├── generation/               # Pluggable generation abstraction (Grounded + LLM)
 │   ├── guardrails/               # PII sanitization and adversarial injection screening
 │   ├── ingestion/                # Document parsing and recursive token chunker
-│   ├── reranker/                 # Lexical heuristic re-ranker (module name is historical; not a neural cross-encoder)
+│   ├── reranker/                 # Lexical heuristic re-ranker (heuristic.py; not a neural cross-encoder)
 │   └── retrieval/                # Dual-mode embeddings, BM25, and hybrid RRF retriever
-├── tests/                        # 67 automated tests across 13 test suites (100% passing)
-├── Dockerfile                    # Multi-stage production container
-├── docker-compose.yml            # Production service orchestration
+├── tests/                        # pytest suite: 68 tests in 13 files
+├── Dockerfile                    # Multi-stage container (non-root user)
+├── docker-compose.yml            # Local service orchestration
 ├── pyproject.toml                # Build system & pytest configuration
-└── requirements.txt              # Pinned production dependencies
+└── requirements.txt              # Dependencies
 ```
 
 ---
 
-## Quickstart Guide
+## Quickstart
 
 ### 1. Installation
 ```bash
-git clone https://github.com/Yasir-Alazmi/enterprise-production-rag.git
-cd enterprise-production-rag
+git clone https://github.com/Yasir-Alazmi/hybrid-rag-rbac.git
+cd hybrid-rag-rbac
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Run Test Suite (67 Tests)
+### 2. Run the tests
 ```bash
 python -m pytest tests/ -v
 ```
 
-### 3. Run Evaluation Harness
+### 3. Reproduce the BEIR SciFact benchmark
+The neural rows need `sentence-transformers` (the `embeddings` extra in `pyproject.toml`). Without it the neural engine falls back to the hashing embedding, so the MiniLM rows cannot be reproduced.
+```bash
+pip install -e ".[embeddings]"
+python scripts/evaluate_beir.py               # downloads SciFact (about 3 MB) to data/beir/ and the MiniLM model
+python scripts/evaluate_beir.py --no-neural   # BM25 and hashing rows only; no extra install needed
+```
+Both write `results/beir_scifact.json` and `results/beir_scifact.md`. Quality numbers should match; latency depends on your machine.
+
+### 4. Run the sample-corpus evaluation and latency benchmark
 ```bash
 python scripts/evaluate_rag.py
-```
-
-### 4. Run Performance Benchmark
-```bash
 python scripts/benchmark.py
 ```
 
-### 5. Start Production API Server
+### 5. Start the API server
 ```bash
 uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 - Interactive Swagger UI: `http://localhost:8000/docs`
-- Prometheus Operational Metrics: `http://localhost:8000/api/v1/metrics`
-- Health Probe: `http://localhost:8000/api/v1/health`
+- Prometheus metrics: `http://localhost:8000/api/v1/metrics`
+- Health probe: `http://localhost:8000/api/v1/health`
 
 ### 6. Query with Bearer Authentication (cURL)
+The tokens below (`token-ciso-root`, `token-admin-restricted`) are hard-coded demo tokens defined in `src/core/security.py`, for local use only. Use signed JWTs anywhere else.
+
 ```bash
-# Query with Verified Admin Bearer Token
+# Query with a demo admin token
 curl -X POST http://localhost:8000/api/v1/query \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer token-ciso-root" \
@@ -270,10 +302,9 @@ curl -X POST http://localhost:8000/api/v1/eval \
 
 ## Author & Contact
 
-**Yasir Alazmi**  
-B.Sc. Artificial Intelligence (expected January 2027), University of Hail  
-- Email: [yasir.alazmi@outlook.sa](mailto:yasir.alazmi@outlook.sa)  
-- LinkedIn: [yasir-alazmi-471832436](https://www.linkedin.com/in/yasir-alazmi-471832436)  
+**Yasir Alazmi**
+- Email: [yasir.alazmi@outlook.sa](mailto:yasir.alazmi@outlook.sa)
+- LinkedIn: [yasir-alazmi-471832436](https://www.linkedin.com/in/yasir-alazmi-471832436)
 - GitHub: [Yasir-Alazmi](https://github.com/Yasir-Alazmi)
 
 _Design, evaluation and review by the author; parts of the implementation were written with AI coding assistants and then reviewed and tested._

@@ -1,5 +1,5 @@
 app:
-  name: "enterprise-production-rag"
+  name: "hybrid-rag-rbac"
   environment: "production"
   log_level: "INFO"
   cors_allowed_origins:
